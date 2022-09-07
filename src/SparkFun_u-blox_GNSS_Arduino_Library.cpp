@@ -17216,6 +17216,26 @@ uint8_t SFE_UBLOX_GNSS::getCarrierSolutionType(uint16_t maxWait)
   return (packetUBXNAVPVT->data.flags.bits.carrSoln);
 }
 
+// Get the last correction age
+// 0 = not available, 1 = 0-1s, 2 = 1-2s, 3 = 2-5s, 4 = 5-10s, 5 = Age between 10 (inclusive) and 15 seconds
+// 6 = Age between 15 (inclusive) and 20 seconds•  7 = Age between 20 (inclusive) and 30 seconds• 
+// 8 = Age between 30 (inclusive) and 45 seconds•  9 = Age between 45 (inclusive) and 60 seconds• 
+// 10 = Age between 60 (inclusive) and 90 seconds•  11 = Age between 90 (inclusive) and 120 seconds• 
+// >=12 = Age greater or equal than 120 seconds
+uint8_t SFE_UBLOX_GNSS::getLastCorrectionAge(uint16_t maxWait)
+{
+  if (packetUBXNAVPVT == NULL)
+    initPacketUBXNAVPVT();     // Check that RAM has been allocated for the PVT data
+  if (packetUBXNAVPVT == NULL) // Bail if the RAM allocation failed
+    return 0;
+
+  if (packetUBXNAVPVT->moduleQueried.moduleQueried2.bits.lastCorrectionAge == false)
+    getPVT(maxWait);
+  packetUBXNAVPVT->moduleQueried.moduleQueried2.bits.lastCorrectionAge = false; // Since we are about to give this to user, mark this data as stale
+  packetUBXNAVPVT->moduleQueried.moduleQueried1.bits.all = false;
+  return (packetUBXNAVPVT->data.flags3.bits.lastCorrectionAge);
+}
+
 // Get the number of satellites used in fix
 uint8_t SFE_UBLOX_GNSS::getSIV(uint16_t maxWait)
 {

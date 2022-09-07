@@ -424,6 +424,7 @@ typedef struct
     struct
     {
       uint8_t invalidLlh : 1; // 1 = Invalid lon, lat, height and hMSL
+      uint8_t lastCorrectionAge : 4; // 0 = not available, 1 = 0-1s, 2 = 1-2s, 3 = 2-5s, 4 = 5-10s, 5 = Age between 10 (inclusive) and 15 seconds•  6 = Age between 15 (inclusive) and 20 seconds•  7 = Age between 20 (inclusive) and 30 seconds•  8 = Age between 30 (inclusive) and 45 seconds•  9 = Age between 45 (inclusive) and 60 seconds•  10 = Age between 60 (inclusive) and 90 seconds•  11 = Age between 90 (inclusive) and 120 seconds•  >=12 = Age greater or equal than 120 seconds
     } bits;
   } flags3;
   uint8_t reserved1[5];
@@ -491,6 +492,7 @@ typedef struct
       uint32_t pDOP : 1;
 
       uint32_t invalidLlh : 1;
+      uint32_t lastCorrectionAge : 1;
 
       uint32_t headVeh : 1;
       uint32_t magDec : 1;
