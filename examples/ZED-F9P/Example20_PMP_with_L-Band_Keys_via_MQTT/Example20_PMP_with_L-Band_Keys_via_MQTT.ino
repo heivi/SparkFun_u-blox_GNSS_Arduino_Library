@@ -161,7 +161,7 @@ void printPVTdata(UBX_NAV_PVT_data_t *ubxDataStruct)
 void printRXMCOR(UBX_RXM_COR_data_t *ubxDataStruct)
 {
   Serial.print(F("UBX-RXM-COR:  ebno: "));
-  Serial.print(ubxDataStruct->ebno);
+  Serial.print((double)ubxDataStruct->ebno / 8, 3); //Convert to dB
 
   Serial.print(F("  protocol: "));
   if (ubxDataStruct->statusInfo.bits.protocol == 1)
@@ -273,10 +273,10 @@ void setup()
   if (ok) ok = myLBand.setVal16(UBLOX_CFG_PMP_DESCRAMBLER_INIT,   26969);       // Default 23560
   if (ok) ok = myLBand.setVal8(UBLOX_CFG_PMP_USE_PRESCRAMBLING,   0);           // Default 0
   if (ok) ok = myLBand.setVal64(UBLOX_CFG_PMP_UNIQUE_WORD,        16238547128276412563ull); 
-  if (ok) ok = myLBand.setVal(UBLOX_CFG_MSGOUT_UBX_RXM_PMP_I2C,   1); // Ensure UBX-RXM-PMP is enabled on the I2C port 
-  if (ok) ok = myLBand.setVal(UBLOX_CFG_MSGOUT_UBX_RXM_PMP_UART1, 1); // Output UBX-RXM-PMP on UART1
-  if (ok) ok = myLBand.setVal(UBLOX_CFG_UART2OUTPROT_UBX, 1);         // Enable UBX output on UART2
-  if (ok) ok = myLBand.setVal(UBLOX_CFG_MSGOUT_UBX_RXM_PMP_UART2, 1); // Output UBX-RXM-PMP on UART2
+  if (ok) ok = myLBand.setVal8(UBLOX_CFG_MSGOUT_UBX_RXM_PMP_I2C,   1); // Ensure UBX-RXM-PMP is enabled on the I2C port 
+  if (ok) ok = myLBand.setVal8(UBLOX_CFG_MSGOUT_UBX_RXM_PMP_UART1, 1); // Output UBX-RXM-PMP on UART1
+  if (ok) ok = myLBand.setVal8(UBLOX_CFG_UART2OUTPROT_UBX, 1);         // Enable UBX output on UART2
+  if (ok) ok = myLBand.setVal8(UBLOX_CFG_MSGOUT_UBX_RXM_PMP_UART2, 1); // Output UBX-RXM-PMP on UART2
   if (ok) ok = myLBand.setVal32(UBLOX_CFG_UART1_BAUDRATE,         38400); // match baudrate with ZED default
   if (ok) ok = myLBand.setVal32(UBLOX_CFG_UART2_BAUDRATE,         38400); // match baudrate with ZED default
   

@@ -627,6 +627,12 @@ bool SFE_UBLOX_GNSS::setPacketCfgPayloadSize(size_t payloadSize)
   return (success);
 }
 
+// Return the number of free bytes remaining in packetCfgPayload
+size_t SFE_UBLOX_GNSS::getPacketCfgSpaceRemaining()
+{
+  return (packetCfgPayloadSize - packetCfg.len);
+}
+
 // Initialize the I2C port
 bool SFE_UBLOX_GNSS::begin(TwoWire &wirePort, uint8_t deviceAddress, uint16_t maxWait, bool assumeSuccess)
 {
@@ -4216,15 +4222,12 @@ void SFE_UBLOX_GNSS::processUBXpacket(ubxPacket *msg)
         packetUBXESFMEAS->data.timeTag = extractLong(msg, 0);
         packetUBXESFMEAS->data.flags.all = extractInt(msg, 4);
         packetUBXESFMEAS->data.id = extractInt(msg, 6);
-        for (uint16_t i = 0; (i < DEF_NUM_SENS) && (i < packetUBXESFMEAS->data.flags.bits.numMeas) && ((i * 4) < (msg->len - 8)); i++)
+        for (uint16_t i = 0; (i < DEF_MAX_NUM_ESF_MEAS) && (i < packetUBXESFMEAS->data.flags.bits.numMeas) && ((i * 4) < (msg->len - 8)); i++)
         {
           packetUBXESFMEAS->data.data[i].data.all = extractLong(msg, 8 + (i * 4));
         }
         if ((uint16_t)msg->len > (uint16_t)(8 + (packetUBXESFMEAS->data.flags.bits.numMeas * 4)))
           packetUBXESFMEAS->data.calibTtag = extractLong(msg, 8 + (packetUBXESFMEAS->data.flags.bits.numMeas * 4));
-
-        // Mark all datums as fresh (not read before)
-        packetUBXESFMEAS->moduleQueried.moduleQueried.all = 0xFFFFFFFF;
 
         // Check if we need to copy the data for the callback
         if ((packetUBXESFMEAS->callbackData != NULL)                                     // If RAM has been allocated for the copy of the data
@@ -4246,14 +4249,12 @@ void SFE_UBLOX_GNSS::processUBXpacket(ubxPacket *msg)
       // Parse various byte fields into storage - but only if we have memory allocated for it
       if (packetUBXESFRAW != NULL)
       {
-        for (uint16_t i = 0; (i < DEF_NUM_SENS) && ((i * 8) < (msg->len - 4)); i++)
+        packetUBXESFRAW->data.numEsfRawBlocks = (msg->len - 4) / 8; // Record how many blocks were received. Could be 7 or 70 (ZED-F9R vs. NEO-M8U)
+        for (uint16_t i = 0; (i < (DEF_NUM_SENS * DEF_MAX_NUM_ESF_RAW_REPEATS)) && ((i * 8) < (msg->len - 4)); i++)
         {
           packetUBXESFRAW->data.data[i].data.all = extractLong(msg, 4 + (i * 8));
           packetUBXESFRAW->data.data[i].sTag = extractLong(msg, 8 + (i * 8));
         }
-
-        // Mark all datums as fresh (not read before)
-        packetUBXESFRAW->moduleQueried.moduleQueried.all = 0xFFFFFFFF;
 
         // Check if we need to copy the data for the callback
         if ((packetUBXESFRAW->callbackData != NULL)                                     // If RAM has been allocated for the copy of the data
@@ -8206,6 +8207,70 @@ bool SFE_UBLOX_GNSS::resetOdometer(uint16_t maxWait)
   return (sendCommand(&packetCfg, maxWait, true) == SFE_UBLOX_STATUS_DATA_SENT); // We are only expecting an ACK
 }
 
+// Enable / disable the odometer
+bool SFE_UBLOX_GNSS::enableOdometer(bool enable, uint16_t maxWait)
+{
+  packetCfg.cls = UBX_CLASS_CFG;
+  packetCfg.id = UBX_CFG_ODO;
+  packetCfg.len = 0;
+  packetCfg.startingSpot = 0;
+
+  // Ask module for the current odometer configuration. Loads into payloadCfg.
+  if (sendCommand(&packetCfg, maxWait) != SFE_UBLOX_STATUS_DATA_RECEIVED) // We are expecting data and an ACK
+    return (false);
+
+  if (enable)
+    payloadCfg[4] = payloadCfg[4] | UBX_CFG_ODO_USE_ODO;
+  else
+    payloadCfg[4] = payloadCfg[4] & ~UBX_CFG_ODO_USE_ODO;
+
+  return (sendCommand(&packetCfg, maxWait) == SFE_UBLOX_STATUS_DATA_SENT); // We are only expecting an ACK
+}
+  
+// Read the odometer configuration
+bool SFE_UBLOX_GNSS::getOdometerConfig(uint8_t *flags, uint8_t *odoCfg, uint8_t *cogMaxSpeed, uint8_t *cogMaxPosAcc, uint8_t *velLpGain, uint8_t *cogLpGain, uint16_t maxWait)
+{
+  packetCfg.cls = UBX_CLASS_CFG;
+  packetCfg.id = UBX_CFG_ODO;
+  packetCfg.len = 0;
+  packetCfg.startingSpot = 0;
+
+  // Ask module for the current odometer configuration. Loads into payloadCfg.
+  if (sendCommand(&packetCfg, maxWait) != SFE_UBLOX_STATUS_DATA_RECEIVED) // We are expecting data and an ACK
+    return (false);
+
+  *flags = payloadCfg[4];
+  *odoCfg = payloadCfg[5];
+  *cogMaxSpeed = payloadCfg[12];
+  *cogMaxPosAcc = payloadCfg[13];
+  *velLpGain = payloadCfg[16];
+  *cogLpGain = payloadCfg[17];
+
+  return true;
+}
+
+// Configure the odometer
+bool SFE_UBLOX_GNSS::setOdometerConfig(uint8_t flags, uint8_t odoCfg, uint8_t cogMaxSpeed, uint8_t cogMaxPosAcc, uint8_t velLpGain, uint8_t cogLpGain, uint16_t maxWait)
+{
+  packetCfg.cls = UBX_CLASS_CFG;
+  packetCfg.id = UBX_CFG_ODO;
+  packetCfg.len = 0;
+  packetCfg.startingSpot = 0;
+
+  // Ask module for the current odometer configuration. Loads into payloadCfg.
+  if (sendCommand(&packetCfg, maxWait) != SFE_UBLOX_STATUS_DATA_RECEIVED) // We are expecting data and an ACK
+    return (false);
+
+  payloadCfg[4] = flags;
+  payloadCfg[5] = odoCfg;
+  payloadCfg[12] = cogMaxSpeed;
+  payloadCfg[13] = cogMaxPosAcc;
+  payloadCfg[16] = velLpGain;
+  payloadCfg[17] = cogLpGain;
+
+  return (sendCommand(&packetCfg, maxWait) == SFE_UBLOX_STATUS_DATA_SENT); // We are only expecting an ACK
+}
+
 // Enable/Disable individual GNSS systems using UBX-CFG-GNSS
 bool SFE_UBLOX_GNSS::enableGNSS(bool enable, sfe_ublox_gnss_ids_e id, uint16_t maxWait)
 {
@@ -9183,6 +9248,8 @@ uint8_t SFE_UBLOX_GNSS::newCfgValset64(uint32_t key, uint64_t value, uint8_t lay
   packetCfg.len = 4 + 4 + 8; // 4 byte header, 4 byte key ID, 8 bytes of value
   packetCfg.startingSpot = 0;
 
+  _numCfgKeyIDs = 1;
+
   // Clear all of packet payload
   memset(payloadCfg, 0, packetCfgPayloadSize);
 
@@ -9220,6 +9287,8 @@ uint8_t SFE_UBLOX_GNSS::newCfgValset32(uint32_t key, uint32_t value, uint8_t lay
   packetCfg.len = 4 + 4 + 4; // 4 byte header, 4 byte key ID, 4 bytes of value
   packetCfg.startingSpot = 0;
 
+  _numCfgKeyIDs = 1;
+
   // Clear all of packet payload
   memset(payloadCfg, 0, packetCfgPayloadSize);
 
@@ -9253,6 +9322,8 @@ uint8_t SFE_UBLOX_GNSS::newCfgValset16(uint32_t key, uint16_t value, uint8_t lay
   packetCfg.len = 4 + 4 + 2; // 4 byte header, 4 byte key ID, 2 bytes of value
   packetCfg.startingSpot = 0;
 
+  _numCfgKeyIDs = 1;
+
   // Clear all of packet payload
   memset(payloadCfg, 0, packetCfgPayloadSize);
 
@@ -9284,7 +9355,9 @@ uint8_t SFE_UBLOX_GNSS::newCfgValset8(uint32_t key, uint8_t value, uint8_t layer
   packetCfg.len = 4 + 4 + 1; // 4 byte header, 4 byte key ID, 1 byte value
   packetCfg.startingSpot = 0;
 
-  // Clear all of packet payload
+  _numCfgKeyIDs = 1;
+
+// Clear all of packet payload
   memset(payloadCfg, 0, packetCfgPayloadSize);
 
   payloadCfg[0] = 0;     // Message Version - set to 0
@@ -9303,10 +9376,62 @@ uint8_t SFE_UBLOX_GNSS::newCfgValset8(uint32_t key, uint8_t value, uint8_t layer
   return (true);
 }
 
+// Start defining a new (empty) UBX-CFG-VALSET ubxPacket
+// Configuration of modern u-blox modules is now done via getVal/setVal/delVal, ie protocol v27 and above found on ZED-F9P
+uint8_t SFE_UBLOX_GNSS::newCfgValset(uint8_t layer)
+{
+  packetCfg.cls = UBX_CLASS_CFG;
+  packetCfg.id = UBX_CFG_VALSET;
+  packetCfg.len = 4; // 4 byte header
+  packetCfg.startingSpot = 0;
+
+  _numCfgKeyIDs = 0;
+
+  // Clear all of packet payload
+  memset(payloadCfg, 0, packetCfgPayloadSize);
+
+  payloadCfg[0] = 0;     // Message Version - set to 0
+  payloadCfg[1] = layer; // By default we ask for the BBR layer
+
+  // All done
+  return (true);
+}
+
 // Add another keyID and value to an existing UBX-CFG-VALSET ubxPacket
 // This function takes a full 32-bit key and 64-bit value
 uint8_t SFE_UBLOX_GNSS::addCfgValset64(uint32_t key, uint64_t value)
 {
+  if ((_autoSendAtSpaceRemaining > 0) && (packetCfg.len >= (packetCfgPayloadSize - _autoSendAtSpaceRemaining)))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("addCfgValset64: autosend"));
+#endif
+    sendCommand(&packetCfg);
+    packetCfg.len = 4; // 4 byte header
+    packetCfg.startingSpot = 0;
+    _numCfgKeyIDs = 0;
+    memset(&payloadCfg[4], 0, packetCfgPayloadSize - 4);
+  }
+
+  if (packetCfg.len >= (packetCfgPayloadSize - 12))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("addCfgValset64: packetCfgPayloadSize reached!"));
+#endif
+    return false;
+  }
+
+  if (_numCfgKeyIDs == CFG_VALSET_MAX_KEYS)
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("addCfgValset64: key limit reached!"));
+#endif
+    return false;
+  }
+
   // Load key into outgoing payload
   payloadCfg[packetCfg.len + 0] = key >> 8 * 0; // Key LSB
   payloadCfg[packetCfg.len + 1] = key >> 8 * 1;
@@ -9326,6 +9451,8 @@ uint8_t SFE_UBLOX_GNSS::addCfgValset64(uint32_t key, uint64_t value)
   // Update packet length: 4 byte key ID, 8 bytes of value
   packetCfg.len = packetCfg.len + 4 + 8;
 
+  _numCfgKeyIDs++;
+
   // All done
   return (true);
 }
@@ -9334,6 +9461,37 @@ uint8_t SFE_UBLOX_GNSS::addCfgValset64(uint32_t key, uint64_t value)
 // This function takes a full 32-bit key and 32-bit value
 uint8_t SFE_UBLOX_GNSS::addCfgValset32(uint32_t key, uint32_t value)
 {
+  if ((_autoSendAtSpaceRemaining > 0) && (packetCfg.len >= (packetCfgPayloadSize - _autoSendAtSpaceRemaining)))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("addCfgValset32: autosend"));
+#endif
+    sendCommand(&packetCfg);
+    packetCfg.len = 4; // 4 byte header
+    packetCfg.startingSpot = 0;
+    _numCfgKeyIDs = 0;
+    memset(&payloadCfg[4], 0, packetCfgPayloadSize - 4);
+  }
+
+  if (packetCfg.len >= (packetCfgPayloadSize - 8))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("addCfgValset32: packetCfgPayloadSize reached!"));
+#endif
+    return false;
+  }
+
+  if (_numCfgKeyIDs == CFG_VALSET_MAX_KEYS)
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("addCfgValset32: key limit reached!"));
+#endif
+    return false;
+  }
+
   // Load key into outgoing payload
   payloadCfg[packetCfg.len + 0] = key >> 8 * 0; // Key LSB
   payloadCfg[packetCfg.len + 1] = key >> 8 * 1;
@@ -9349,6 +9507,8 @@ uint8_t SFE_UBLOX_GNSS::addCfgValset32(uint32_t key, uint32_t value)
   // Update packet length: 4 byte key ID, 4 bytes of value
   packetCfg.len = packetCfg.len + 4 + 4;
 
+  _numCfgKeyIDs++;
+
   // All done
   return (true);
 }
@@ -9357,6 +9517,37 @@ uint8_t SFE_UBLOX_GNSS::addCfgValset32(uint32_t key, uint32_t value)
 // This function takes a full 32-bit key and 16-bit value
 uint8_t SFE_UBLOX_GNSS::addCfgValset16(uint32_t key, uint16_t value)
 {
+  if ((_autoSendAtSpaceRemaining > 0) && (packetCfg.len >= (packetCfgPayloadSize - _autoSendAtSpaceRemaining)))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("addCfgValset16: autosend"));
+#endif
+    sendCommand(&packetCfg);
+    packetCfg.len = 4; // 4 byte header
+    packetCfg.startingSpot = 0;
+    _numCfgKeyIDs = 0;
+    memset(&payloadCfg[4], 0, packetCfgPayloadSize - 4);
+  }
+
+  if (packetCfg.len >= (packetCfgPayloadSize - 6))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("addCfgValset16: packetCfgPayloadSize reached!"));
+#endif
+    return false;
+  }
+
+  if (_numCfgKeyIDs == CFG_VALSET_MAX_KEYS)
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("addCfgValset16: key limit reached!"));
+#endif
+    return false;
+  }
+
   // Load key into outgoing payload
   payloadCfg[packetCfg.len + 0] = key >> 8 * 0; // Key LSB
   payloadCfg[packetCfg.len + 1] = key >> 8 * 1;
@@ -9370,6 +9561,8 @@ uint8_t SFE_UBLOX_GNSS::addCfgValset16(uint32_t key, uint16_t value)
   // Update packet length: 4 byte key ID, 2 bytes of value
   packetCfg.len = packetCfg.len + 4 + 2;
 
+  _numCfgKeyIDs++;
+
   // All done
   return (true);
 }
@@ -9378,6 +9571,37 @@ uint8_t SFE_UBLOX_GNSS::addCfgValset16(uint32_t key, uint16_t value)
 // This function takes a full 32-bit key and 8-bit value
 uint8_t SFE_UBLOX_GNSS::addCfgValset8(uint32_t key, uint8_t value)
 {
+  if ((_autoSendAtSpaceRemaining > 0) && (packetCfg.len >= (packetCfgPayloadSize - _autoSendAtSpaceRemaining)))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("addCfgValset8: autosend"));
+#endif
+    sendCommand(&packetCfg);
+    packetCfg.len = 4; // 4 byte header
+    packetCfg.startingSpot = 0;
+    _numCfgKeyIDs = 0;
+    memset(&payloadCfg[4], 0, packetCfgPayloadSize - 4);
+  }
+
+  if (packetCfg.len >= (packetCfgPayloadSize - 5))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("addCfgValset8: packetCfgPayloadSize reached!"));
+#endif
+    return false;
+  }
+
+  if (_numCfgKeyIDs == CFG_VALSET_MAX_KEYS)
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("addCfgValset8: key limit reached!"));
+#endif
+    return false;
+  }
+
   // Load key into outgoing payload
   payloadCfg[packetCfg.len + 0] = key >> 8 * 0; // Key LSB
   payloadCfg[packetCfg.len + 1] = key >> 8 * 1;
@@ -9390,6 +9614,8 @@ uint8_t SFE_UBLOX_GNSS::addCfgValset8(uint32_t key, uint8_t value)
   // Update packet length: 4 byte key ID, 1 byte value
   packetCfg.len = packetCfg.len + 4 + 1;
 
+  _numCfgKeyIDs++;
+
   // All done
   return (true);
 }
@@ -9398,8 +9624,38 @@ uint8_t SFE_UBLOX_GNSS::addCfgValset8(uint32_t key, uint8_t value)
 // This function takes a full 32-bit key and 64-bit value
 uint8_t SFE_UBLOX_GNSS::sendCfgValset64(uint32_t key, uint64_t value, uint16_t maxWait)
 {
-  // Load keyID and value into outgoing payload
-  addCfgValset64(key, value);
+  if ((_autoSendAtSpaceRemaining > 0) && (packetCfg.len >= (packetCfgPayloadSize - _autoSendAtSpaceRemaining)))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("sendCfgValset64: autosend"));
+#endif
+    sendCommand(&packetCfg);
+    packetCfg.len = 4; // 4 byte header
+    packetCfg.startingSpot = 0;
+    _numCfgKeyIDs = 0;
+    memset(&payloadCfg[4], 0, packetCfgPayloadSize - 4);
+  }
+
+  if (packetCfg.len >= (packetCfgPayloadSize - 12))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("sendCfgValset64: packetCfgPayloadSize reached!"));
+#endif
+  }
+  else if (_numCfgKeyIDs == CFG_VALSET_MAX_KEYS)
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("sendCfgValset64: key limit reached!"));
+#endif
+  }
+  else
+    // Load keyID and value into outgoing payload
+    addCfgValset64(key, value);
+
+  _numCfgKeyIDs = 0;
 
   // Send VALSET command with this key and value
   return (sendCommand(&packetCfg, maxWait) == SFE_UBLOX_STATUS_DATA_SENT); // We are only expecting an ACK
@@ -9409,8 +9665,38 @@ uint8_t SFE_UBLOX_GNSS::sendCfgValset64(uint32_t key, uint64_t value, uint16_t m
 // This function takes a full 32-bit key and 32-bit value
 uint8_t SFE_UBLOX_GNSS::sendCfgValset32(uint32_t key, uint32_t value, uint16_t maxWait)
 {
-  // Load keyID and value into outgoing payload
-  addCfgValset32(key, value);
+  if ((_autoSendAtSpaceRemaining > 0) && (packetCfg.len >= (packetCfgPayloadSize - _autoSendAtSpaceRemaining)))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("sendCfgValset32: autosend"));
+#endif
+    sendCommand(&packetCfg);
+    packetCfg.len = 4; // 4 byte header
+    packetCfg.startingSpot = 0;
+    _numCfgKeyIDs = 0;
+    memset(&payloadCfg[4], 0, packetCfgPayloadSize - 4);
+  }
+
+  if (packetCfg.len >= (packetCfgPayloadSize - 8))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("sendCfgValset32: packetCfgPayloadSize reached!"));
+#endif
+  }
+  else if (_numCfgKeyIDs == CFG_VALSET_MAX_KEYS)
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("sendCfgValset32: key limit reached!"));
+#endif
+  }
+  else
+    // Load keyID and value into outgoing payload
+    addCfgValset32(key, value);
+
+  _numCfgKeyIDs = 0;
 
   // Send VALSET command with this key and value
   return (sendCommand(&packetCfg, maxWait) == SFE_UBLOX_STATUS_DATA_SENT); // We are only expecting an ACK
@@ -9420,8 +9706,38 @@ uint8_t SFE_UBLOX_GNSS::sendCfgValset32(uint32_t key, uint32_t value, uint16_t m
 // This function takes a full 32-bit key and 16-bit value
 uint8_t SFE_UBLOX_GNSS::sendCfgValset16(uint32_t key, uint16_t value, uint16_t maxWait)
 {
-  // Load keyID and value into outgoing payload
-  addCfgValset16(key, value);
+  if ((_autoSendAtSpaceRemaining > 0) && (packetCfg.len >= (packetCfgPayloadSize - _autoSendAtSpaceRemaining)))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("sendCfgValset16: autosend"));
+#endif
+    sendCommand(&packetCfg);
+    packetCfg.len = 4; // 4 byte header
+    packetCfg.startingSpot = 0;
+    _numCfgKeyIDs = 0;
+    memset(&payloadCfg[4], 0, packetCfgPayloadSize - 4);
+  }
+
+  if (packetCfg.len >= (packetCfgPayloadSize - 6))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("sendCfgValset16: packetCfgPayloadSize reached!"));
+#endif
+  }
+  else if (_numCfgKeyIDs == CFG_VALSET_MAX_KEYS)
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("sendCfgValset16: key limit reached!"));
+#endif
+  }
+  else
+    // Load keyID and value into outgoing payload
+    addCfgValset16(key, value);
+
+  _numCfgKeyIDs = 0;
 
   // Send VALSET command with this key and value
   return (sendCommand(&packetCfg, maxWait) == SFE_UBLOX_STATUS_DATA_SENT); // We are only expecting an ACK
@@ -9431,11 +9747,68 @@ uint8_t SFE_UBLOX_GNSS::sendCfgValset16(uint32_t key, uint16_t value, uint16_t m
 // This function takes a full 32-bit key and 8-bit value
 uint8_t SFE_UBLOX_GNSS::sendCfgValset8(uint32_t key, uint8_t value, uint16_t maxWait)
 {
-  // Load keyID and value into outgoing payload
-  addCfgValset8(key, value);
+  if ((_autoSendAtSpaceRemaining > 0) && (packetCfg.len >= (packetCfgPayloadSize - _autoSendAtSpaceRemaining)))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("sendCfgValset8: autosend"));
+#endif
+    sendCommand(&packetCfg);
+    packetCfg.len = 4; // 4 byte header
+    packetCfg.startingSpot = 0;
+    _numCfgKeyIDs = 0;
+    memset(&payloadCfg[4], 0, packetCfgPayloadSize - 4);
+  }
+
+  if (packetCfg.len >= (packetCfgPayloadSize - 5))
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("sendCfgValset8: packetCfgPayloadSize reached!"));
+#endif
+  }
+  else if (_numCfgKeyIDs == CFG_VALSET_MAX_KEYS)
+  {
+#ifndef SFE_UBLOX_REDUCED_PROG_MEM
+    if ((_printDebug == true) || (_printLimitedDebug == true)) // This is important. Print this if doing limited debugging
+      _debugSerial->println(F("sendCfgValset8: key limit reached!"));
+#endif
+  }
+  else
+    // Load keyID and value into outgoing payload
+    addCfgValset8(key, value);
+
+  _numCfgKeyIDs = 0;
 
   // Send VALSET command with this key and value
   return (sendCommand(&packetCfg, maxWait) == SFE_UBLOX_STATUS_DATA_SENT); // We are only expecting an ACK
+}
+
+// Send the UBX-CFG-VALSET ubxPacket
+uint8_t SFE_UBLOX_GNSS::sendCfgValset(uint16_t maxWait)
+{
+  if (_numCfgKeyIDs == 0)
+    return true; // Nothing to send...
+
+  // Send VALSET command with this key and value
+  bool success = sendCommand(&packetCfg, maxWait) == SFE_UBLOX_STATUS_DATA_SENT; // We are only expecting an ACK
+
+  if (success)
+    _numCfgKeyIDs = 0;
+
+  return success;
+}
+
+// Return the number of keys in the CfgValset
+uint8_t SFE_UBLOX_GNSS::getCfgValsetLen()
+{
+  return _numCfgKeyIDs;
+}
+
+// Return the number of free bytes remaining in packetCfgPayload
+size_t SFE_UBLOX_GNSS::getCfgValsetSpaceRemaining()
+{
+  return getPacketCfgSpaceRemaining();
 }
 
 //=-=-=-=-=-=-=-= "Automatic" Messages =-=-=-=-=-=-=-==-=-=-=-=-=-=-=
@@ -10068,10 +10441,7 @@ bool SFE_UBLOX_GNSS::getNAVEOE(uint16_t maxWait)
   }
   else
   {
-    // if (_printDebug == true)
-    // {
-    //   _debugSerial->println(F("getEOE: Polling"));
-    // }
+    // Note to self: NAV-EOE is "Periodic" (only). Not sure if it can be polled?
 
     // The GPS is not automatically reporting navigation position so we have to poll explicitly
     packetCfg.cls = UBX_CLASS_NAV;
@@ -10087,18 +10457,9 @@ bool SFE_UBLOX_GNSS::getNAVEOE(uint16_t maxWait)
 
     if (retVal == SFE_UBLOX_STATUS_DATA_OVERWRITTEN)
     {
-      // if (_printDebug == true)
-      // {
-      //   _debugSerial->println(F("getEOE: data in packetCfg was OVERWRITTEN by another message (but that's OK)"));
-      // }
       return (true);
     }
 
-    // if (_printDebug == true)
-    // {
-    //   _debugSerial->print(F("getEOE retVal: "));
-    //   _debugSerial->println(statusString(retVal));
-    // }
     return (false);
   }
 }
@@ -10233,7 +10594,7 @@ bool SFE_UBLOX_GNSS::getVehAtt(uint16_t maxWait)
 bool SFE_UBLOX_GNSS::getNAVATT(uint16_t maxWait)
 {
   if (packetUBXNAVATT == NULL)
-    initPacketUBXNAVATT();     // Check that RAM has been allocated for the ESF RAW data
+    initPacketUBXNAVATT();     // Check that RAM has been allocated for the NAV ATT data
   if (packetUBXNAVATT == NULL) // Only attempt this if RAM allocation was successful
     return false;
 
@@ -10373,7 +10734,7 @@ bool SFE_UBLOX_GNSS::setAutoNAVATTcallbackPtr(void (*callbackPointerPtr)(UBX_NAV
 bool SFE_UBLOX_GNSS::assumeAutoNAVATT(bool enabled, bool implicitUpdate)
 {
   if (packetUBXNAVATT == NULL)
-    initPacketUBXNAVATT();     // Check that RAM has been allocated for the ESF RAW data
+    initPacketUBXNAVATT();     // Check that RAM has been allocated for the NAV ATT data
   if (packetUBXNAVATT == NULL) // Only attempt this if RAM allocation was successful
     return false;
 
@@ -13178,14 +13539,14 @@ bool SFE_UBLOX_GNSS::initPacketUBXRXMCOR()
 bool SFE_UBLOX_GNSS::getRXMSFRBX(uint16_t maxWait)
 {
   if (packetUBXRXMSFRBX == NULL)
-    initPacketUBXRXMSFRBX();     // Check that RAM has been allocated for the TM2 data
+    initPacketUBXRXMSFRBX();     // Check that RAM has been allocated for the SFRBX data
   if (packetUBXRXMSFRBX == NULL) // Bail if the RAM allocation failed
     return (false);
 
   if (packetUBXRXMSFRBX->automaticFlags.flags.bits.automatic && packetUBXRXMSFRBX->automaticFlags.flags.bits.implicitUpdate)
   {
     // The GPS is automatically reporting, we just check whether we got unread data
-    checkUbloxInternal(&packetCfg, UBX_CLASS_TIM, UBX_TIM_TM2);
+    checkUbloxInternal(&packetCfg, UBX_CLASS_RXM, UBX_RXM_SFRBX);
     return packetUBXRXMSFRBX->moduleQueried;
   }
   else if (packetUBXRXMSFRBX->automaticFlags.flags.bits.automatic && !packetUBXRXMSFRBX->automaticFlags.flags.bits.implicitUpdate)
@@ -13195,23 +13556,9 @@ bool SFE_UBLOX_GNSS::getRXMSFRBX(uint16_t maxWait)
   }
   else
   {
-    // The GPS is not automatically reporting navigation position so we have to poll explicitly
-    packetCfg.cls = UBX_CLASS_RXM;
-    packetCfg.id = UBX_RXM_SFRBX;
-    packetCfg.len = 0;
-    packetCfg.startingSpot = 0;
-
-    // The data is parsed as part of processing the response
-    sfe_ublox_status_e retVal = sendCommand(&packetCfg, maxWait);
-
-    if (retVal == SFE_UBLOX_STATUS_DATA_RECEIVED)
-      return (true);
-
-    if (retVal == SFE_UBLOX_STATUS_DATA_OVERWRITTEN)
-    {
-      return (true);
-    }
-
+    // SFRBX is output-only. It cannot be polled...
+    // Strictly, getRXMSFRBX should be deprecated. But, to keep the library backward compatible, return(false) here.
+    // See issue #167 for details
     return (false);
   }
 }
@@ -13370,14 +13717,14 @@ void SFE_UBLOX_GNSS::logRXMSFRBX(bool enabled)
 bool SFE_UBLOX_GNSS::getRXMRAWX(uint16_t maxWait)
 {
   if (packetUBXRXMRAWX == NULL)
-    initPacketUBXRXMRAWX();     // Check that RAM has been allocated for the TM2 data
+    initPacketUBXRXMRAWX();     // Check that RAM has been allocated for the RAWX data
   if (packetUBXRXMRAWX == NULL) // Bail if the RAM allocation failed
     return (false);
 
   if (packetUBXRXMRAWX->automaticFlags.flags.bits.automatic && packetUBXRXMRAWX->automaticFlags.flags.bits.implicitUpdate)
   {
     // The GPS is automatically reporting, we just check whether we got unread data
-    checkUbloxInternal(&packetCfg, UBX_CLASS_TIM, UBX_TIM_TM2);
+    checkUbloxInternal(&packetCfg, UBX_CLASS_RXM, UBX_RXM_RAWX);
     return packetUBXRXMRAWX->moduleQueried;
   }
   else if (packetUBXRXMRAWX->automaticFlags.flags.bits.automatic && !packetUBXRXMRAWX->automaticFlags.flags.bits.implicitUpdate)
@@ -14517,92 +14864,19 @@ void SFE_UBLOX_GNSS::logESFINS(bool enabled)
 
 // ***** ESF MEAS automatic support
 
-bool SFE_UBLOX_GNSS::getEsfDataInfo(uint16_t maxWait)
-{
-  return (getESFMEAS(maxWait));
-}
-
-bool SFE_UBLOX_GNSS::getESFMEAS(uint16_t maxWait)
-{
-  if (packetUBXESFMEAS == NULL)
-    initPacketUBXESFMEAS();     // Check that RAM has been allocated for the ESF MEAS data
-  if (packetUBXESFMEAS == NULL) // Only attempt this if RAM allocation was successful
-    return false;
-
-  if (packetUBXESFMEAS->automaticFlags.flags.bits.automatic && packetUBXESFMEAS->automaticFlags.flags.bits.implicitUpdate)
-  {
-    // The GPS is automatically reporting, we just check whether we got unread data
-    //  if (_printDebug == true)
-    //  {
-    //    _debugSerial->println(F("getEsfDataInfo: Autoreporting"));
-    //  }
-    checkUbloxInternal(&packetCfg, UBX_CLASS_ESF, UBX_ESF_MEAS);
-    return packetUBXESFMEAS->moduleQueried.moduleQueried.bits.all;
-  }
-  else if (packetUBXESFMEAS->automaticFlags.flags.bits.automatic && !packetUBXESFMEAS->automaticFlags.flags.bits.implicitUpdate)
-  {
-    // Someone else has to call checkUblox for us...
-    //  if (_printDebug == true)
-    //  {
-    //    _debugSerial->println(F("getEsfDataInfo: Exit immediately"));
-    //  }
-    return (false);
-  }
-  else
-  {
-    // if (_printDebug == true)
-    // {
-    //   _debugSerial->println(F("getEsfDataInfo: Polling"));
-    // }
-
-    // The GPS is not automatically reporting HNR PVT so we have to poll explicitly
-    packetCfg.cls = UBX_CLASS_ESF;
-    packetCfg.id = UBX_ESF_MEAS;
-    packetCfg.len = 0;
-    packetCfg.startingSpot = 0;
-
-    // The data is parsed as part of processing the response
-    sfe_ublox_status_e retVal = sendCommand(&packetCfg, maxWait);
-
-    if (retVal == SFE_UBLOX_STATUS_DATA_RECEIVED)
-      return (true);
-
-    if (retVal == SFE_UBLOX_STATUS_DATA_OVERWRITTEN)
-    {
-      // if (_printDebug == true)
-      // {
-      //   _debugSerial->println(F("getEsfDataInfo: data in packetCfg was OVERWRITTEN by another message (but that's OK)"));
-      // }
-      return (true);
-    }
-
-    // if (_printDebug == true)
-    // {
-    //   _debugSerial->print(F("getEsfDataInfo retVal: "));
-    //   _debugSerial->println(statusString(retVal));
-    // }
-    return (false);
-  }
-
-  return (false); // Trap. We should never get here...
-}
-
-// Enable or disable automatic ESF MEAS message generation by the GNSS. This changes the way getESFDataInfo
-// works.
+// Enable or disable automatic ESF MEAS message generation by the GNSS
 bool SFE_UBLOX_GNSS::setAutoESFMEAS(bool enable, uint16_t maxWait)
 {
   return setAutoESFMEASrate(enable ? 1 : 0, true, maxWait);
 }
 
-// Enable or disable automatic ESF MEAS message generation by the GNSS. This changes the way getESFDataInfo
-// works.
+// Enable or disable automatic ESF MEAS message generation by the GNSS
 bool SFE_UBLOX_GNSS::setAutoESFMEAS(bool enable, bool implicitUpdate, uint16_t maxWait)
 {
   return setAutoESFMEASrate(enable ? 1 : 0, implicitUpdate, maxWait);
 }
 
-// Enable or disable automatic ESF MEAS message generation by the GNSS. This changes the way getESFDataInfo
-// works.
+// Enable or disable automatic ESF MEAS message generation by the GNSS
 bool SFE_UBLOX_GNSS::setAutoESFMEASrate(uint8_t rate, bool implicitUpdate, uint16_t maxWait)
 {
   if (packetUBXESFMEAS == NULL)
@@ -14627,7 +14901,6 @@ bool SFE_UBLOX_GNSS::setAutoESFMEASrate(uint8_t rate, bool implicitUpdate, uint1
     packetUBXESFMEAS->automaticFlags.flags.bits.automatic = (rate > 0);
     packetUBXESFMEAS->automaticFlags.flags.bits.implicitUpdate = implicitUpdate;
   }
-  packetUBXESFMEAS->moduleQueried.moduleQueried.bits.all = false; // Mark data as stale
   return ok;
 }
 
@@ -14716,16 +14989,7 @@ bool SFE_UBLOX_GNSS::initPacketUBXESFMEAS()
   packetUBXESFMEAS->callbackPointer = NULL;
   packetUBXESFMEAS->callbackPointerPtr = NULL;
   packetUBXESFMEAS->callbackData = NULL;
-  packetUBXESFMEAS->moduleQueried.moduleQueried.all = 0;
   return (true);
-}
-
-// Mark all the data as read/stale
-void SFE_UBLOX_GNSS::flushESFMEAS()
-{
-  if (packetUBXESFMEAS == NULL)
-    return;                                              // Bail if RAM has not been allocated (otherwise we could be writing anywhere!)
-  packetUBXESFMEAS->moduleQueried.moduleQueried.all = 0; // Mark all datums as stale (read before)
 }
 
 // Log this data in file buffer
@@ -14738,92 +15002,23 @@ void SFE_UBLOX_GNSS::logESFMEAS(bool enabled)
 
 // ***** ESF RAW automatic support
 
-bool SFE_UBLOX_GNSS::getEsfRawDataInfo(uint16_t maxWait)
-{
-  return (getESFRAW(maxWait));
-}
+// ESF RAW messages are output only. They cannot be polled.
 
-bool SFE_UBLOX_GNSS::getESFRAW(uint16_t maxWait)
-{
-  if (packetUBXESFRAW == NULL)
-    initPacketUBXESFRAW();     // Check that RAM has been allocated for the ESF RAW data
-  if (packetUBXESFRAW == NULL) // Only attempt this if RAM allocation was successful
-    return false;
-
-  if (packetUBXESFRAW->automaticFlags.flags.bits.automatic && packetUBXESFRAW->automaticFlags.flags.bits.implicitUpdate)
-  {
-    // The GPS is automatically reporting, we just check whether we got unread data
-    //  if (_printDebug == true)
-    //  {
-    //    _debugSerial->println(F("getEsfRawDataInfo: Autoreporting"));
-    //  }
-    checkUbloxInternal(&packetCfg, UBX_CLASS_ESF, UBX_ESF_RAW);
-    return packetUBXESFRAW->moduleQueried.moduleQueried.bits.all;
-  }
-  else if (packetUBXESFRAW->automaticFlags.flags.bits.automatic && !packetUBXESFRAW->automaticFlags.flags.bits.implicitUpdate)
-  {
-    // Someone else has to call checkUblox for us...
-    //  if (_printDebug == true)
-    //  {
-    //    _debugSerial->println(F("getEsfRawDataInfo: Exit immediately"));
-    //  }
-    return (false);
-  }
-  else
-  {
-    // if (_printDebug == true)
-    // {
-    //   _debugSerial->println(F("getEsfRawDataInfo: Polling"));
-    // }
-
-    // The GPS is not automatically reporting HNR PVT so we have to poll explicitly
-    packetCfg.cls = UBX_CLASS_ESF;
-    packetCfg.id = UBX_ESF_RAW;
-    packetCfg.len = 0;
-    packetCfg.startingSpot = 0;
-
-    // The data is parsed as part of processing the response
-    sfe_ublox_status_e retVal = sendCommand(&packetCfg, maxWait);
-
-    if (retVal == SFE_UBLOX_STATUS_DATA_RECEIVED)
-      return (true);
-
-    if (retVal == SFE_UBLOX_STATUS_DATA_OVERWRITTEN)
-    {
-      // if (_printDebug == true)
-      // {
-      //   _debugSerial->println(F("getEsfRawDataInfo: data in packetCfg was OVERWRITTEN by another message (but that's OK)"));
-      // }
-      return (true);
-    }
-
-    // if (_printDebug == true)
-    // {
-    //   _debugSerial->print(F("getEsfRawDataInfo retVal: "));
-    //   _debugSerial->println(statusString(retVal));
-    // }
-    return (false);
-  }
-
-  return (false); // Trap. We should never get here...
-}
-
-// Enable or disable automatic ESF RAW message generation by the GNSS. This changes the way getESFRawDataInfo
-// works.
+// Enable or disable automatic ESF RAW message generation by the GNSS.
 bool SFE_UBLOX_GNSS::setAutoESFRAW(bool enable, uint16_t maxWait)
 {
   return setAutoESFRAWrate(enable ? 1 : 0, true, maxWait);
 }
 
-// Enable or disable automatic ESF RAW message generation by the GNSS. This changes the way getESFRawDataInfo
-// works.
+// Enable or disable automatic ESF RAW message generation by the GNSS.
 bool SFE_UBLOX_GNSS::setAutoESFRAW(bool enable, bool implicitUpdate, uint16_t maxWait)
 {
   return setAutoESFRAWrate(enable ? 1 : 0, implicitUpdate, maxWait);
 }
 
-// Enable or disable automatic ESF RAW message generation by the GNSS. This changes the way getESFRawDataInfo
-// works.
+// Enable or disable automatic ESF RAW message generation by the GNSS.
+// Note: this function can only be used to enable or disable the messages. A rate of zero disables the messages.
+// A rate of 1 or more causes the messages to be generated at the full 100Hz.
 bool SFE_UBLOX_GNSS::setAutoESFRAWrate(uint8_t rate, bool implicitUpdate, uint16_t maxWait)
 {
   if (packetUBXESFRAW == NULL)
@@ -14848,11 +15043,10 @@ bool SFE_UBLOX_GNSS::setAutoESFRAWrate(uint8_t rate, bool implicitUpdate, uint16
     packetUBXESFRAW->automaticFlags.flags.bits.automatic = (rate > 0);
     packetUBXESFRAW->automaticFlags.flags.bits.implicitUpdate = implicitUpdate;
   }
-  packetUBXESFRAW->moduleQueried.moduleQueried.bits.all = false; // Mark data as stale
   return ok;
 }
 
-// Enable automatic navigation message generation by the GNSS.
+// Enable automatic message generation by the GNSS.
 bool SFE_UBLOX_GNSS::setAutoESFRAWcallback(void (*callbackPointer)(UBX_ESF_RAW_data_t), uint16_t maxWait)
 {
   // Enable auto messages. Set implicitUpdate to false as we expect the user to call checkUblox manually.
@@ -14937,16 +15131,7 @@ bool SFE_UBLOX_GNSS::initPacketUBXESFRAW()
   packetUBXESFRAW->callbackPointer = NULL;
   packetUBXESFRAW->callbackPointerPtr = NULL;
   packetUBXESFRAW->callbackData = NULL;
-  packetUBXESFRAW->moduleQueried.moduleQueried.all = 0;
   return (true);
-}
-
-// Mark all the data as read/stale
-void SFE_UBLOX_GNSS::flushESFRAW()
-{
-  if (packetUBXESFRAW == NULL)
-    return;                                             // Bail if RAM has not been allocated (otherwise we could be writing anywhere!)
-  packetUBXESFRAW->moduleQueried.moduleQueried.all = 0; // Mark all datums as stale (read before)
 }
 
 // Log this data in file buffer
@@ -17301,6 +17486,8 @@ int32_t SFE_UBLOX_GNSS::getAltitude(uint16_t maxWait)
 // Get the current altitude in mm according to mean sea level
 // Ellipsoid model: https://www.esri.com/news/arcuser/0703/geoid1of3.html
 // Difference between Ellipsoid Model and Mean Sea Level: https://eos-gnss.com/elevation-for-beginners/
+// Also see: https://portal.u-blox.com/s/question/0D52p00008HKDSkCAP/what-geoid-model-is-used-and-where-is-this-calculated
+// and: https://cddis.nasa.gov/926/egm96/egm96.html on 10x10 degree grid
 int32_t SFE_UBLOX_GNSS::getAltitudeMSL(uint16_t maxWait)
 {
   if (packetUBXNAVPVT == NULL)
@@ -17545,6 +17732,108 @@ uint32_t SFE_UBLOX_GNSS::getPositionAccuracy(uint16_t maxWait)
   tempAccuracy /= 10;  // Convert 0.1mm units to mm
 
   return (tempAccuracy);
+}
+
+// Get the current 3D high precision X coordinate
+// Returns a long representing the coordinate in cm
+int32_t SFE_UBLOX_GNSS::getHighResECEFX(uint16_t maxWait)
+{
+  if (packetUBXNAVHPPOSECEF == NULL)
+    initPacketUBXNAVHPPOSECEF();     // Check that RAM has been allocated for the HPPOSECEF data
+  if (packetUBXNAVHPPOSECEF == NULL) // Bail if the RAM allocation failed
+    return 0;
+
+  if (packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.ecefX == false)
+    getNAVHPPOSECEF(maxWait);
+  packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.ecefX = false; // Since we are about to give this to user, mark this data as stale
+  packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.all = false;
+
+  return (packetUBXNAVHPPOSECEF->data.ecefX);
+}
+
+// Get the current 3D high precision Y coordinate
+// Returns a long representing the coordinate in cm
+int32_t SFE_UBLOX_GNSS::getHighResECEFY(uint16_t maxWait)
+{
+  if (packetUBXNAVHPPOSECEF == NULL)
+    initPacketUBXNAVHPPOSECEF();     // Check that RAM has been allocated for the HPPOSECEF data
+  if (packetUBXNAVHPPOSECEF == NULL) // Bail if the RAM allocation failed
+    return 0;
+
+  if (packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.ecefY == false)
+    getNAVHPPOSECEF(maxWait);
+  packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.ecefY = false; // Since we are about to give this to user, mark this data as stale
+  packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.all = false;
+
+  return (packetUBXNAVHPPOSECEF->data.ecefY);
+}
+
+// Get the current 3D high precision Z coordinate
+// Returns a long representing the coordinate in cm
+int32_t SFE_UBLOX_GNSS::getHighResECEFZ(uint16_t maxWait)
+{
+  if (packetUBXNAVHPPOSECEF == NULL)
+    initPacketUBXNAVHPPOSECEF();     // Check that RAM has been allocated for the HPPOSECEF data
+  if (packetUBXNAVHPPOSECEF == NULL) // Bail if the RAM allocation failed
+    return 0;
+
+  if (packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.ecefZ == false)
+    getNAVHPPOSECEF(maxWait);
+  packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.ecefZ = false; // Since we are about to give this to user, mark this data as stale
+  packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.all = false;
+
+  return (packetUBXNAVHPPOSECEF->data.ecefZ);
+}
+
+// Get the high precision component of the ECEF X coordinate
+// Returns a signed byte representing the component as 0.1*mm
+int8_t SFE_UBLOX_GNSS::getHighResECEFXHp(uint16_t maxWait)
+{
+  if (packetUBXNAVHPPOSECEF == NULL)
+    initPacketUBXNAVHPPOSECEF();     // Check that RAM has been allocated for the HPPOSECEF data
+  if (packetUBXNAVHPPOSECEF == NULL) // Bail if the RAM allocation failed
+    return 0;
+
+  if (packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.ecefXHp == false)
+    getNAVHPPOSECEF(maxWait);
+  packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.ecefXHp = false; // Since we are about to give this to user, mark this data as stale
+  packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.all = false;
+
+  return (packetUBXNAVHPPOSECEF->data.ecefXHp);
+}
+
+// Get the high precision component of the ECEF Y coordinate
+// Returns a signed byte representing the component as 0.1*mm
+int8_t SFE_UBLOX_GNSS::getHighResECEFYHp(uint16_t maxWait)
+{
+  if (packetUBXNAVHPPOSECEF == NULL)
+    initPacketUBXNAVHPPOSECEF();     // Check that RAM has been allocated for the HPPOSECEF data
+  if (packetUBXNAVHPPOSECEF == NULL) // Bail if the RAM allocation failed
+    return 0;
+
+  if (packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.ecefYHp == false)
+    getNAVHPPOSECEF(maxWait);
+  packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.ecefYHp = false; // Since we are about to give this to user, mark this data as stale
+  packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.all = false;
+
+  return (packetUBXNAVHPPOSECEF->data.ecefYHp);
+}
+
+// Get the high precision component of the ECEF Z coordinate
+// Returns a signed byte representing the component as 0.1*mm
+int8_t SFE_UBLOX_GNSS::getHighResECEFZHp(uint16_t maxWait)
+{
+  if (packetUBXNAVHPPOSECEF == NULL)
+    initPacketUBXNAVHPPOSECEF();     // Check that RAM has been allocated for the HPPOSECEF data
+  if (packetUBXNAVHPPOSECEF == NULL) // Bail if the RAM allocation failed
+    return 0;
+
+  if (packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.ecefZHp == false)
+    getNAVHPPOSECEF(maxWait);
+  packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.ecefZHp = false; // Since we are about to give this to user, mark this data as stale
+  packetUBXNAVHPPOSECEF->moduleQueried.moduleQueried.bits.all = false;
+
+  return (packetUBXNAVHPPOSECEF->data.ecefZHp);
 }
 
 // ***** HPPOSLLH Helper Functions
@@ -18038,40 +18327,9 @@ float SFE_UBLOX_GNSS::getESFyaw(uint16_t maxWait) // Returned as degrees
   return (((float)packetUBXESFALG->data.yaw) / 100.0); // Convert to degrees
 }
 
-bool SFE_UBLOX_GNSS::getSensorFusionMeasurement(UBX_ESF_MEAS_sensorData_t *sensorData, uint8_t sensor, uint16_t maxWait)
-{
-  if (packetUBXESFMEAS == NULL)
-    initPacketUBXESFMEAS();     // Check that RAM has been allocated for the ESF MEAS data
-  if (packetUBXESFMEAS == NULL) // Bail if the RAM allocation failed
-    return (false);
-
-  if ((packetUBXESFMEAS->moduleQueried.moduleQueried.bits.data & (1 << sensor)) == 0)
-    getESFMEAS(maxWait);
-  packetUBXESFMEAS->moduleQueried.moduleQueried.bits.data &= ~(1 << sensor); // Since we are about to give this to user, mark this data as stale
-  packetUBXESFMEAS->moduleQueried.moduleQueried.bits.all = false;
-  sensorData->data.all = packetUBXESFMEAS->data.data[sensor].data.all;
-  return (true);
-}
-
 bool SFE_UBLOX_GNSS::getSensorFusionMeasurement(UBX_ESF_MEAS_sensorData_t *sensorData, UBX_ESF_MEAS_data_t ubxDataStruct, uint8_t sensor)
 {
   sensorData->data.all = ubxDataStruct.data[sensor].data.all;
-  return (true);
-}
-
-bool SFE_UBLOX_GNSS::getRawSensorMeasurement(UBX_ESF_RAW_sensorData_t *sensorData, uint8_t sensor, uint16_t maxWait)
-{
-  if (packetUBXESFRAW == NULL)
-    initPacketUBXESFRAW();     // Check that RAM has been allocated for the ESF RAW data
-  if (packetUBXESFRAW == NULL) // Bail if the RAM allocation failed
-    return (false);
-
-  if ((packetUBXESFRAW->moduleQueried.moduleQueried.bits.data & (1 << sensor)) == 0)
-    getESFRAW(maxWait);
-  packetUBXESFRAW->moduleQueried.moduleQueried.bits.data &= ~(1 << sensor); // Since we are about to give this to user, mark this data as stale
-  packetUBXESFRAW->moduleQueried.moduleQueried.bits.all = false;
-  sensorData->data.all = packetUBXESFRAW->data.data[sensor].data.all;
-  sensorData->sTag = packetUBXESFRAW->data.data[sensor].sTag;
   return (true);
 }
 

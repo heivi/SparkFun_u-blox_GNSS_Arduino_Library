@@ -465,6 +465,22 @@ const uint8_t COM_TYPE_NMEA = (1 << 1);
 const uint8_t COM_TYPE_RTCM3 = (1 << 5);
 const uint8_t COM_TYPE_SPARTN = (1 << 6);
 
+// Odometer configuration - flags
+const uint8_t UBX_CFG_ODO_USE_ODO = (1 << 0);
+const uint8_t UBX_CFG_ODO_USE_COG = (1 << 1);
+const uint8_t UBX_CFG_ODO_OUT_LP_VEL = (1 << 2);
+const uint8_t UBX_CFG_ODO_OUT_LP_COG = (1 << 3);
+
+// Odometer configuration - odoCfg
+enum odoCfg_e
+{
+  UBX_CFG_ODO_RUN = 0,
+  UBX_CFG_ODO_CYCLE,
+  UBX_CFG_ODO_SWIM,
+  UBX_CFG_ODO_CAR,
+  UBX_CFG_ODO_CUSTOM,
+};
+
 // Configuration Sub-Section mask definitions for saveConfigSelective (UBX-CFG-CFG)
 const uint32_t VAL_CFG_SUBSEC_IOPORT = 0x00000001;   // ioPort - communications port settings (causes IO system reset!)
 const uint32_t VAL_CFG_SUBSEC_MSGCONF = 0x00000002;  // msgConf - message configuration
@@ -664,6 +680,7 @@ public:
 
   // New in v2.0: allow the payload size for packetCfg to be changed
   bool setPacketCfgPayloadSize(size_t payloadSize); // Set packetCfgPayloadSize
+  size_t getPacketCfgSpaceRemaining();              // Returns the number of free bytes remaining in packetCfgPayload
 
   // Begin communication with the GNSS. Advanced users can assume success if required. Useful if the port is already outputting messages at high navigation rate.
   // Begin will then return true if "signs of life" have been seen: reception of _any_ valid UBX packet or _any_ valid NMEA header.
@@ -908,8 +925,11 @@ public:
   bool setDynamicModel(dynModel newDynamicModel = DYN_MODEL_PORTABLE, uint16_t maxWait = defaultMaxWait);
   uint8_t getDynamicModel(uint16_t maxWait = defaultMaxWait); // Get the dynamic model - returns 255 if the sendCommand fails
 
-  // Reset the odometer
+  // Reset / enable / configure the odometer
   bool resetOdometer(uint16_t maxWait = defaultMaxWait); // Reset the odometer
+  bool enableOdometer(bool enable = true, uint16_t maxWait = defaultMaxWait); // Enable / disable the odometer
+  bool getOdometerConfig(uint8_t *flags, uint8_t *odoCfg, uint8_t *cogMaxSpeed, uint8_t *cogMaxPosAcc, uint8_t *velLpGain, uint8_t *cogLpGain, uint16_t maxWait = defaultMaxWait); // Read the odometer configuration
+  bool setOdometerConfig(uint8_t flags, uint8_t odoCfg, uint8_t cogMaxSpeed, uint8_t cogMaxPosAcc, uint8_t velLpGain, uint8_t cogLpGain, uint16_t maxWait = defaultMaxWait); // Configure the odometer
 
   // Enable/Disable individual GNSS systems using UBX-CFG-GNSS
   // Note: you must leave at least one major GNSS enabled! If in doubt, enable GPS before disabling the others
@@ -979,6 +999,7 @@ public:
   uint8_t setVal16(uint32_t keyID, uint16_t value, uint8_t layer = VAL_LAYER_ALL, uint16_t maxWait = defaultMaxWait);             // Sets the 16-bit value at a given group/id/size location
   uint8_t setVal32(uint32_t keyID, uint32_t value, uint8_t layer = VAL_LAYER_ALL, uint16_t maxWait = defaultMaxWait);             // Sets the 32-bit value at a given group/id/size location
   uint8_t setVal64(uint32_t keyID, uint64_t value, uint8_t layer = VAL_LAYER_ALL, uint16_t maxWait = defaultMaxWait);             // Sets the 64-bit value at a given group/id/size location
+  uint8_t newCfgValset(uint8_t layer = VAL_LAYER_ALL);                                                                            // Create a new, empty UBX-CFG-VALSET. Add entries with addCfgValset8/16/32/64
   uint8_t newCfgValset8(uint32_t keyID, uint8_t value, uint8_t layer = VAL_LAYER_ALL);                                            // Define a new UBX-CFG-VALSET with the given KeyID and 8-bit value
   uint8_t newCfgValset16(uint32_t keyID, uint16_t value, uint8_t layer = VAL_LAYER_ALL);                                          // Define a new UBX-CFG-VALSET with the given KeyID and 16-bit value
   uint8_t newCfgValset32(uint32_t keyID, uint32_t value, uint8_t layer = VAL_LAYER_ALL);                                          // Define a new UBX-CFG-VALSET with the given KeyID and 32-bit value
@@ -991,6 +1012,10 @@ public:
   uint8_t sendCfgValset16(uint32_t keyID, uint16_t value, uint16_t maxWait = defaultMaxWait);                                     // Add the final KeyID and 16-bit value to an existing UBX-CFG-VALSET ubxPacket and send it
   uint8_t sendCfgValset32(uint32_t keyID, uint32_t value, uint16_t maxWait = defaultMaxWait);                                     // Add the final KeyID and 32-bit value to an existing UBX-CFG-VALSET ubxPacket and send it
   uint8_t sendCfgValset64(uint32_t keyID, uint64_t value, uint16_t maxWait = defaultMaxWait);                                     // Add the final KeyID and 64-bit value to an existing UBX-CFG-VALSET ubxPacket and send it
+  uint8_t sendCfgValset(uint16_t maxWait = defaultMaxWait);                                                                       // Send the CfgValset (UBX-CFG-VALSET) construct
+  uint8_t getCfgValsetLen();                                                                                                      // Returns the length of the current CfgValset construct as number-of-keyIDs
+  size_t getCfgValsetSpaceRemaining();                                                                                            // Returns the number of free bytes remaining in packetCfg
+  void autoSendCfgValsetAtSpaceRemaining(size_t spaceRemaining) { _autoSendAtSpaceRemaining = spaceRemaining; }                   // Cause CFG_VALSET packets to be sent automatically when packetCfg has less than this many bytes available
 
   // get and set functions for all of the "automatic" message processing
 
@@ -1272,26 +1297,20 @@ public:
   void flushESFINS();                                                                                                 // Mark all the data as read/stale
   void logESFINS(bool enabled = true);                                                                                // Log data to file buffer
 
-  bool getEsfDataInfo(uint16_t maxWait = defaultMaxWait);                                                               // ESF MEAS Helper
-  bool getESFMEAS(uint16_t maxWait = defaultMaxWait);                                                                   // ESF MEAS
   bool setAutoESFMEAS(bool enabled, uint16_t maxWait = defaultMaxWait);                                                 // Enable/disable automatic ESF MEAS reports
   bool setAutoESFMEAS(bool enabled, bool implicitUpdate, uint16_t maxWait = defaultMaxWait);                            // Enable/disable automatic ESF MEAS reports, with implicitUpdate == false accessing stale data will not issue parsing of data in the rxbuffer of your interface, instead you have to call checkUblox when you want to perform an update
   bool setAutoESFMEASrate(uint8_t rate, bool implicitUpdate = true, uint16_t maxWait = defaultMaxWait);                 // Set the rate for automatic MEAS reports
   bool setAutoESFMEAScallback(void (*callbackPointer)(UBX_ESF_MEAS_data_t), uint16_t maxWait = defaultMaxWait);         // Enable automatic MEAS reports at the navigation frequency. Data is accessed from the callback.
   bool setAutoESFMEAScallbackPtr(void (*callbackPointerPtr)(UBX_ESF_MEAS_data_t *), uint16_t maxWait = defaultMaxWait); // Enable automatic MEAS reports at the navigation frequency. Data is accessed from the callback.
   bool assumeAutoESFMEAS(bool enabled, bool implicitUpdate = true);                                                     // In case no config access to the GPS is possible and ESF MEAS is send cyclically already
-  void flushESFMEAS();                                                                                                  // Mark all the data as read/stale
   void logESFMEAS(bool enabled = true);                                                                                 // Log data to file buffer
 
-  bool getEsfRawDataInfo(uint16_t maxWait = defaultMaxWait);                                                          // ESF RAW Helper
-  bool getESFRAW(uint16_t maxWait = defaultMaxWait);                                                                  // ESF RAW
   bool setAutoESFRAW(bool enabled, uint16_t maxWait = defaultMaxWait);                                                // Enable/disable automatic ESF RAW reports
   bool setAutoESFRAW(bool enabled, bool implicitUpdate, uint16_t maxWait = defaultMaxWait);                           // Enable/disable automatic ESF RAW reports, with implicitUpdate == false accessing stale data will not issue parsing of data in the rxbuffer of your interface, instead you have to call checkUblox when you want to perform an update
   bool setAutoESFRAWrate(uint8_t rate, bool implicitUpdate = true, uint16_t maxWait = defaultMaxWait);                // Set the rate for automatic RAW reports
   bool setAutoESFRAWcallback(void (*callbackPointer)(UBX_ESF_RAW_data_t), uint16_t maxWait = defaultMaxWait);         // Enable automatic RAW reports at the navigation frequency. Data is accessed from the callback.
   bool setAutoESFRAWcallbackPtr(void (*callbackPointerPtr)(UBX_ESF_RAW_data_t *), uint16_t maxWait = defaultMaxWait); // Enable automatic RAW reports at the navigation frequency. Data is accessed from the callback.
   bool assumeAutoESFRAW(bool enabled, bool implicitUpdate = true);                                                    // In case no config access to the GPS is possible and ESF RAW is send cyclically already
-  void flushESFRAW();                                                                                                 // Mark all the data as read/stale
   void logESFRAW(bool enabled = true);                                                                                // Log data to file buffer
 
   // High navigation rate (HNR)
@@ -1409,6 +1428,12 @@ public:
   // Helper functions for HPPOSECEF
 
   uint32_t getPositionAccuracy(uint16_t maxWait = defaultMaxWait); // Returns the 3D accuracy of the current high-precision fix, in mm. Supported on NEO-M8P, ZED-F9P,
+  int32_t getHighResECEFX(uint16_t maxWait = defaultMaxWait);      // Returns the ECEF X coordinate (cm)
+  int32_t getHighResECEFY(uint16_t maxWait = defaultMaxWait);      // Returns the ECEF Y coordinate (cm)
+  int32_t getHighResECEFZ(uint16_t maxWait = defaultMaxWait);      // Returns the ECEF Z coordinate (cm)
+  int8_t getHighResECEFXHp(uint16_t maxWait = defaultMaxWait);     // Returns the ECEF X coordinate High Precision Component (0.1 mm)
+  int8_t getHighResECEFYHp(uint16_t maxWait = defaultMaxWait);     // Returns the ECEF Y coordinate High Precision Component (0.1 mm)
+  int8_t getHighResECEFZHp(uint16_t maxWait = defaultMaxWait);     // Returns the ECEF Z coordinate High Precision Component (0.1 mm)
 
   // Helper functions for HPPOSLLH
 
@@ -1463,9 +1488,7 @@ public:
   float getESFroll(uint16_t maxWait = defaultMaxWait);  // Returned as degrees
   float getESFpitch(uint16_t maxWait = defaultMaxWait); // Returned as degrees
   float getESFyaw(uint16_t maxWait = defaultMaxWait);   // Returned as degrees
-  bool getSensorFusionMeasurement(UBX_ESF_MEAS_sensorData_t *sensorData, uint8_t sensor, uint16_t maxWait = defaultMaxWait);
   bool getSensorFusionMeasurement(UBX_ESF_MEAS_sensorData_t *sensorData, UBX_ESF_MEAS_data_t ubxDataStruct, uint8_t sensor);
-  bool getRawSensorMeasurement(UBX_ESF_RAW_sensorData_t *sensorData, uint8_t sensor, uint16_t maxWait = defaultMaxWait);
   bool getRawSensorMeasurement(UBX_ESF_RAW_sensorData_t *sensorData, UBX_ESF_RAW_data_t ubxDataStruct, uint8_t sensor);
   bool getSensorFusionStatus(UBX_ESF_STATUS_sensorStatus_t *sensorStatus, uint8_t sensor, uint16_t maxWait = defaultMaxWait);
   bool getSensorFusionStatus(UBX_ESF_STATUS_sensorStatus_t *sensorStatus, UBX_ESF_STATUS_data_t ubxDataStruct, uint8_t sensor);
@@ -1791,6 +1814,12 @@ private:
   // .begin will return true if the assumeSuccess parameter is true and if _signsOfLife is true
   // _signsOfLife is set to true when: a valid UBX message is seen; a valig NMEA header is seen.
   bool _signsOfLife;
+
+  // Keep track of how many keys have been added to CfgValset
+  uint8_t _numCfgKeyIDs = 0;
+
+  // Send the current CFG_VALSET message when packetCfg has less than this many bytes available
+  size_t _autoSendAtSpaceRemaining = 0;
 };
 
 #endif
